@@ -1,6 +1,6 @@
 # =============================
 # app.py – QUALISEM G. (registros)
-# Planilla LUN–SÁB con abrir/cerrar semana, NUEVA SEMANA,
+# Planilla LUN–SÁB con abrir/cerrar semana, LIMPIAR VISTA,
 # trabajador existente/nuevo, "Monto adicional" consistente y editor de trabajador
 # =============================
 import pandas as pd
@@ -59,7 +59,7 @@ if "wk_fecha_ref" not in st.session_state:
 if "wk_fecha_ref_input" not in st.session_state:
     st.session_state["wk_fecha_ref_input"] = st.session_state["wk_fecha_ref"]
 
-# Widget de fecha SIEMPRE lee/escribe la misma key
+# Widget de fecha (misma key siempre)
 fecha_ref = st.sidebar.date_input(
     "Semana de referencia (cualquier día)",
     value=st.session_state["wk_fecha_ref_input"],
@@ -69,20 +69,24 @@ fecha_ref = st.sidebar.date_input(
 # Sincroniza variable interna con el widget
 if st.session_state["wk_fecha_ref"] != fecha_ref:
     st.session_state["wk_fecha_ref"] = fecha_ref
+    # Si cambias la semana de referencia, desactiva "vista limpia"
+    if "limpiar_vista" in st.session_state:
+        st.session_state["limpiar_vista"] = False
 
 # Fechas LUN–SÁB
 sem_ini = monday_of_week(st.session_state["wk_fecha_ref"])
 sem_fin = saturday_of_week(st.session_state["wk_fecha_ref"])
 
-# Crea/obtiene la semana actual (no forzamos encargado aquí)
+# Crea/obtiene la semana actual
 semana_id, encargado_guardado, cerrada = ensure_semana(sem_ini, sem_fin, None)
 
-# Input de encargado (key distinta a las de fecha)
+# Input de encargado (key distinta)
 encargado_input = st.sidebar.text_input(
     "Encargado de la semana",
     value=encargado_guardado or "",
     key="wk_encargado_input",
 )
+
 # Si cambió, actualiza DB
 if (encargado_input or "") != (encargado_guardado or ""):
     with get_conn() as conn:
@@ -108,14 +112,11 @@ else:
         st.warning("🔒 Semana cerrada correctamente.")
         st.rerun()
 
-# 🆕 Nueva semana: avanza 7 días y ACTUALIZA AMBAS KEYS antes del rerun
-if st.sidebar.button("🆕 Nueva semana (Lun–Sáb)", use_container_width=True):
-    nueva_ref = st.session_state["wk_fecha_ref"] + timedelta(days=7)
-    st.session_state["wk_fecha_ref"] = nueva_ref
-    st.session_state["wk_fecha_ref_input"] = nueva_ref   # <— sincroniza el widget
-    clear_form_state()                                    # limpia entradas y selects
-    ensure_semana(monday_of_week(nueva_ref), saturday_of_week(nueva_ref))
-    st.rerun()
+# 🧹 Limpiar vista (solo visual)
+if st.sidebar.button("🧹 Limpiar vista (solo visual)", use_container_width=True):
+    st.session_state["limpiar_vista"] = True
+    clear_form_state()
+    st.experimental_rerun()
 
 # -------------------- Tabs --------------------
 reg_tab, montos_tab = st.tabs(["📋 Registros (Lun–Sáb)", "💰 Montos y Total (pago sábado)"])
@@ -243,7 +244,8 @@ with reg_tab:
                     )
 
             # Si es sábado y hay monto > 0, forzar flag
-            extra_flag = 1 if (es_sabado and float(add_extra_monto or 0) > 0) else int(bool(add_extra_flag) and es_sabado)
+            extra_flag = 1 if (es_sabado and float(add_extra_monto or 0) > 0) \
+                           else int(bool(add_extra_flag) and es_sabado)
             extra_monto = float(add_extra_monto if extra_flag else 0)
 
             try:
@@ -269,6 +271,8 @@ with reg_tab:
                         ),
                     )
                 st.success("Registro guardado/actualizado.")
+                # Al guardar, salimos del modo "vista limpia"
+                st.session_state["limpiar_vista"] = False
                 clear_form_state()
                 st.rerun()
             except Exception as e:
@@ -321,19 +325,23 @@ with reg_tab:
     st.divider()
     st.markdown("## 📊 Vista semanal (Lun–Sáb) por trabajador")
 
-    with get_conn() as conn:
-        df_det = pd.read_sql_query(
-            """
-            SELECT e.fecha, e.trabajador, e.actividad, e.monto, e.extra_monto,
-                   COALESCE(t.cargo, '') AS cargo
-            FROM entradas e
-            LEFT JOIN trabajadores t ON t.nombre = e.trabajador
-            WHERE e.semana_id=? AND date(e.fecha) BETWEEN date(?) AND date(?)
-            ORDER BY e.trabajador, date(e.fecha)
-            """,
-            conn,
-            params=(semana_id, sem_ini.isoformat(), sem_fin.isoformat()),
-        )
+    if st.session_state.get("limpiar_vista", False):
+        st.info("🧹 Vista limpia: comienza a registrar. Los datos se mostrarán nuevamente al guardar un registro.")
+        df_det = pd.DataFrame()
+    else:
+        with get_conn() as conn:
+            df_det = pd.read_sql_query(
+                """
+                SELECT e.fecha, e.trabajador, e.actividad, e.monto, e.extra_monto,
+                       COALESCE(t.cargo, '') AS cargo
+                FROM entradas e
+                LEFT JOIN trabajadores t ON t.nombre = e.trabajador
+                WHERE e.semana_id=? AND date(e.fecha) BETWEEN date(?) AND date(?)
+                ORDER BY e.trabajador, date(e.fecha)
+                """,
+                conn,
+                params=(semana_id, sem_ini.isoformat(), sem_fin.isoformat()),
+            )
 
     if df_det.empty:
         st.info("Sin registros en la semana seleccionada.")
@@ -341,17 +349,24 @@ with reg_tab:
         df_det["fecha"] = pd.to_datetime(df_det["fecha"]).dt.date
         df_det["dow"] = pd.to_datetime(df_det["fecha"]).dt.weekday
 
+        # Montos por día LUN–SÁB
         df_pivot = df_det.pivot_table(index=["trabajador"], columns="dow", values="monto", aggfunc="sum").fillna(0)
         df_pivot = df_pivot.rename(columns={i: label_dow(i) for i in range(6)})
 
+        # Monto adicional (sábado): SUMA
         extras = (
             df_det[df_det["dow"] == 5]
             .groupby("trabajador", as_index=False)
             .agg(monto_adicional=("extra_monto", "sum"))
         )
+
+        # Días trabajados (fechas únicas)
         dias = df_det.groupby("trabajador")["fecha"].nunique().rename("dias").reset_index()
+
+        # Cargo por trabajador
         cargos = df_det.groupby("trabajador")["cargo"].agg(lambda x: next((v for v in x if v), "")).rename("cargo").reset_index()
 
+        # Unir
         df_sem = (
             df_pivot.reset_index()
             .merge(extras, on="trabajador", how="left")
@@ -373,23 +388,27 @@ with reg_tab:
 with montos_tab:
     st.markdown("## 💰 Montos y Total (pago sábado)")
 
-    with get_conn() as conn:
-        df = pd.read_sql_query(
-            """
-            SELECT e.trabajador,
-                   COALESCE(t.cargo, '') AS cargo,
-                   COUNT(DISTINCT date(e.fecha)) AS dias,
-                   SUM(CASE WHEN strftime('%w', e.fecha) IN ('1','2','3','4','5','6') THEN e.monto ELSE 0 END) AS monto_semana,
-                   SUM(CASE WHEN strftime('%w', e.fecha) = '6' THEN e.extra_monto ELSE 0 END) AS monto_adicional
-            FROM entradas e
-            LEFT JOIN trabajadores t ON t.nombre = e.trabajador
-            WHERE e.semana_id=?
-            GROUP BY e.trabajador, t.cargo
-            ORDER BY e.trabajador
-            """,
-            conn,
-            params=(semana_id,),
-        )
+    if st.session_state.get("limpiar_vista", False):
+        st.info("🧹 Vista limpia: sin datos para mostrar hasta que guardes algún registro.")
+        df = pd.DataFrame()
+    else:
+        with get_conn() as conn:
+            df = pd.read_sql_query(
+                """
+                SELECT e.trabajador,
+                       COALESCE(t.cargo, '') AS cargo,
+                       COUNT(DISTINCT date(e.fecha)) AS dias,
+                       SUM(CASE WHEN strftime('%w', e.fecha) IN ('1','2','3','4','5','6') THEN e.monto ELSE 0 END) AS monto_semana,
+                       SUM(CASE WHEN strftime('%w', e.fecha) = '6' THEN e.extra_monto ELSE 0 END) AS monto_adicional
+                FROM entradas e
+                LEFT JOIN trabajadores t ON t.nombre = e.trabajador
+                WHERE e.semana_id=?
+                GROUP BY e.trabajador, t.cargo
+                ORDER BY e.trabajador
+                """,
+                conn,
+                params=(semana_id,),
+            )
 
     if df.empty:
         st.info("Sin registros todavía.")
