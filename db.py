@@ -1,10 +1,11 @@
 """
-db.py — Conexión y schema SQLite (con cierre de semana y tabla trabajadores)
+db.py — Conexión y schema SQLite (Lun–Sáb, cierre de semana y catálogo de trabajadores)
 """
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
+# La DB se crea en runtime aquí:
 DB_PATH = Path("data/registro.db")
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -25,20 +26,18 @@ SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS semanas (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     semana_inicio  TEXT NOT NULL,   -- Lunes (YYYY-MM-DD)
-    semana_fin     TEXT NOT NULL,   -- Domingo (YYYY-MM-DD)
+    semana_fin     TEXT NOT NULL,   -- Sábado (YYYY-MM-DD)  ⚠️ versiones antiguas pueden tener Domingo
     encargado      TEXT NOT NULL,
     cerrada        INTEGER NOT NULL DEFAULT 0, -- 0: abierta, 1: cerrada
     UNIQUE (semana_inicio, semana_fin)
 );
 
--- Catálogo de trabajadores para autocompletar
 CREATE TABLE IF NOT EXISTS trabajadores (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     nombre  TEXT NOT NULL UNIQUE,
     activo  INTEGER NOT NULL DEFAULT 1
 );
 
--- Entradas por día/empleado. Para sábado se permite pago adicional.
 CREATE TABLE IF NOT EXISTS entradas (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     semana_id    INTEGER NOT NULL,
