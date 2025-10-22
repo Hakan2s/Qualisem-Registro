@@ -1,5 +1,5 @@
 # =============================
-# app.py – Planilla LUN–SÁB con abrir/cerrar semana, autocomplete y cargo
+# app.py – Planilla LUN–SÁB con abrir/cerrar semana, NUEVA SEMANA y trabajador existente/nuevo
 # =============================
 import pandas as pd
 import streamlit as st
@@ -7,12 +7,7 @@ from datetime import date, timedelta
 
 from db import get_conn, init_db
 
-st.set_page_config(
-    page_title="Planilla semanal – Lunes a Sábado",
-    layout="wide",
-)
-
-# Inicializa DB
+st.set_page_config(page_title="Planilla semanal – Lunes a Sábado", layout="wide")
 init_db()
 
 # -------------------- Utilidades (LUN–SÁB) --------------------
@@ -25,70 +20,72 @@ def saturday_of_week(d: date) -> date:
 def label_dow(idx: int) -> str:
     return ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"][idx]
 
-# -------------------- Sidebar: semana + encargado + abrir/cerrar --------------------
+def ensure_semana(ini: date, fin: date, encargado: str | None = None):
+    """Crea semana si no existe; devuelve (id, encargado, cerrada)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, encargado, cerrada FROM semanas WHERE semana_inicio=? AND semana_fin=?",
+            (ini.isoformat(), fin.isoformat()),
+        ).fetchone()
+        if row is None:
+            enc = (encargado or "").strip() or "—"
+            conn.execute(
+                "INSERT INTO semanas(semana_inicio, semana_fin, encargado, cerrada) VALUES (?,?,?,0)",
+                (ini.isoformat(), fin.isoformat(), enc),
+            )
+            row = conn.execute(
+                "SELECT id, encargado, cerrada FROM semanas WHERE semana_inicio=? AND semana_fin=?",
+                (ini.isoformat(), fin.isoformat()),
+            ).fetchone()
+        return row["id"], row["encargado"], int(row["cerrada"])
+
+# -------------------- Sidebar: semana + encargado + abrir/cerrar + nueva semana --------------------
 st.sidebar.title("🗓️ Semana & Encargado")
 
+# estado inicial de fecha de referencia
+if "wk_fecha_ref" not in st.session_state:
+    st.session_state["wk_fecha_ref"] = date.today()
+
+# controles
 fecha_ref = st.sidebar.date_input(
     "Semana de referencia (cualquier día)",
-    value=date.today(),
-    key="wk_fecha_ref",
+    value=st.session_state["wk_fecha_ref"],
+    key="wk_fecha_ref_input",  # widget key
 )
+# sincroniza con session_state
+st.session_state["wk_fecha_ref"] = fecha_ref
 
 sem_ini = monday_of_week(fecha_ref)
-sem_fin = saturday_of_week(fecha_ref)  # LUN–SÁB
+sem_fin = saturday_of_week(fecha_ref)
 
-encargado_input = st.sidebar.text_input(
-    "Encargado de la semana",
-    value="",
-    key="wk_encargado",
-)
+encargado_input = st.sidebar.text_input("Encargado de la semana", value="", key="wk_encargado")
 
-# Crear/obtener semana (compat: si no existe LUN–SÁB, busca LUN–DOM de semanas antiguas)
-with get_conn() as conn:
-    row = conn.execute(
-        "SELECT id, encargado, cerrada FROM semanas WHERE semana_inicio=? AND semana_fin=?",
-        (sem_ini.isoformat(), sem_fin.isoformat()),
-    ).fetchone()
-
-    if row is None:
-        dom = sem_ini + timedelta(days=6)  # compat LUN–DOM
-        row = conn.execute(
-            "SELECT id, encargado, cerrada FROM semanas WHERE semana_inicio=? AND semana_fin=?",
-            (sem_ini.isoformat(), dom.isoformat()),
-        ).fetchone()
-
-    if row is None and encargado_input:
-        conn.execute(
-            "INSERT INTO semanas(semana_inicio, semana_fin, encargado) VALUES (?,?,?)",
-            (sem_ini.isoformat(), sem_fin.isoformat(), encargado_input.strip()),
-        )
-        row = conn.execute(
-            "SELECT id, encargado, cerrada FROM semanas WHERE semana_inicio=? AND semana_fin=?",
-            (sem_ini.isoformat(), sem_fin.isoformat()),
-        ).fetchone()
-
-    semana_id   = row["id"] if row else None
-    encargado   = row["encargado"] if row else None
-    cerrada     = int(row["cerrada"]) if row else 0
+# Obtener o crear semana actual (compat: si tenías semanas Lun–Dom antiguas, puedes adaptarlo aquí si quieres)
+semana_id, encargado, cerrada = ensure_semana(sem_ini, sem_fin, encargado_input or None)
 
 st.sidebar.caption(f"Semana: **{sem_ini} a {sem_fin}** (Lun–Sáb)")
-if semana_id:
-    if cerrada:
-        st.sidebar.error(f"Semana CERRADA. Encargado: {encargado}")
-        if st.sidebar.button("🔓 Abrir semana", use_container_width=True):
-            with get_conn() as conn:
-                conn.execute("UPDATE semanas SET cerrada=0 WHERE id=?", (int(semana_id),))
-            st.success("✅ Semana abierta nuevamente.")
-            st.rerun()
-    else:
-        st.sidebar.success(f"Semana ABIERTA. Encargado: {encargado}")
-        if st.sidebar.button("🔒 Cerrar semana", use_container_width=True):
-            with get_conn() as conn:
-                conn.execute("UPDATE semanas SET cerrada=1 WHERE id=?", (int(semana_id),))
-            st.warning("🔒 Semana cerrada correctamente.")
-            st.rerun()
+if cerrada:
+    st.sidebar.error(f"Semana CERRADA. Encargado: {encargado}")
+    if st.sidebar.button("🔓 Abrir semana", use_container_width=True):
+        with get_conn() as conn:
+            conn.execute("UPDATE semanas SET cerrada=0 WHERE id=?", (int(semana_id),))
+        st.success("✅ Semana abierta nuevamente.")
+        st.rerun()
 else:
-    st.sidebar.info("Ingresa el encargado para registrar la semana y poder guardar entradas.")
+    st.sidebar.success(f"Semana ABIERTA. Encargado: {encargado}")
+    if st.sidebar.button("🔒 Cerrar semana", use_container_width=True):
+        with get_conn() as conn:
+            conn.execute("UPDATE semanas SET cerrada=1 WHERE id=?", (int(semana_id),))
+        st.warning("🔒 Semana cerrada correctamente.")
+        st.rerun()
+
+# Botón: Nueva semana (mueve la referencia 7 días hacia adelante y crea la semana)
+if st.sidebar.button("🆕 Nueva semana (Lun–Sáb)", use_container_width=True):
+    nueva_ref = fecha_ref + timedelta(days=7)
+    st.session_state["wk_fecha_ref"] = nueva_ref
+    # crea la semana si no existe
+    _id, _enc, _cer = ensure_semana(monday_of_week(nueva_ref), saturday_of_week(nueva_ref))
+    st.rerun()
 
 # -------------------- Tabs --------------------
 reg_tab, montos_tab = st.tabs(["📅 Registros (Lun–Sáb)", "💵 Montos y Total (pago sábado)"])
@@ -103,19 +100,27 @@ with reg_tab:
     with st.form("add_form", clear_on_submit=True):
         disabled = bool(cerrada)
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns([1, 2])
         with c1:
-            max_fecha = sem_fin  # LUN–SÁB
             add_fecha = st.date_input(
                 "Fecha",
                 value=sem_ini,
                 min_value=sem_ini,
-                max_value=max_fecha,
+                max_value=sem_fin,
                 key="add_fecha",
                 disabled=disabled,
             )
-        with c2:
-            # Autocomplete de trabajadores desde catálogo
+
+        # --- Modo de trabajador: existente vs nuevo ---
+        modo = st.radio(
+            "Modo de trabajador",
+            ["Existente", "Nuevo"],
+            horizontal=True,
+            key="modo_trab",
+            disabled=disabled,
+        )
+
+        if modo == "Existente":
             with get_conn() as conn:
                 rows = conn.execute(
                     "SELECT nombre, COALESCE(cargo, '') AS cargo FROM trabajadores WHERE activo=1 ORDER BY nombre"
@@ -123,41 +128,44 @@ with reg_tab:
             nombres = [r["nombre"] for r in rows]
             cargos_map = {r["nombre"]: r["cargo"] for r in rows}
 
-            opciones = ["— Escribe nombre —", *nombres, "➕ Agregar nuevo…"]
-            sel_nombre = st.selectbox(
+            sel_trab = st.selectbox(
                 "Trabajador (autocompletar)",
-                options=opciones,
+                options=["(Seleccione)"] + nombres,
                 index=0,
                 disabled=disabled,
-                key="sel_trabajador",
+                key="sel_trab_existente",
             )
-
-            if sel_nombre == "➕ Agregar nuevo…":
-                add_trab_new = st.text_input("Nuevo trabajador", key="add_trab_new", disabled=disabled)
-                add_cargo_new = st.text_input("Cargo", key="add_cargo_new", disabled=disabled)
-                add_trab = add_trab_new.strip() if add_trab_new else ""
-                add_cargo = add_cargo_new.strip() if add_cargo_new else ""
-            elif sel_nombre == "— Escribe nombre —":
-                add_trab = ""
-                add_cargo = ""
+            if sel_trab != "(Seleccione)":
+                cargo_exist = cargos_map.get(sel_trab, "")
             else:
-                add_trab = sel_nombre
-                add_cargo = cargos_map.get(sel_nombre, "")
-                st.text_input("Cargo", value=add_cargo, disabled=True, key="cargo_existente")
+                cargo_exist = ""
 
-        with c3:
+            coln1, coln2 = st.columns(2)
+            with coln1:
+                st.text_input("Nombre", value=sel_trab if sel_trab != "(Seleccione)" else "", disabled=True, key="readonly_nombre")
+            with coln2:
+                st.text_input("Cargo", value=cargo_exist, disabled=True, key="readonly_cargo")
+
+            add_trab = sel_trab if sel_trab != "(Seleccione)" else ""
+            add_cargo = cargo_exist
+
+        else:  # Nuevo
+            coln1, coln2 = st.columns(2)
+            with coln1:
+                add_trab = st.text_input("Nombre (nuevo)", key="add_trab_new", disabled=disabled).strip()
+            with coln2:
+                add_cargo = st.text_input("Cargo", key="add_cargo_new", disabled=disabled).strip()
+
+        # Monto día y actividad
+        col3, col4 = st.columns(2)
+        with col3:
             add_monto = st.number_input(
-                "Monto del día (S/)",
-                min_value=0.0,
-                step=1.0,
-                value=0.0,
-                key="add_monto",
-                disabled=disabled,
+                "Monto del día (S/)", min_value=0.0, step=1.0, value=0.0, key="add_monto", disabled=disabled
             )
+        with col4:
+            add_act = st.text_input("Actividad (opcional)", key="add_act", disabled=disabled)
 
-        add_act = st.text_input("Actividad (opcional)", key="add_act", disabled=disabled)
-
-        # Adicional sábado: solo se habilita si la fecha elegida es sábado
+        # Adicional sábado (solo si es sábado)
         es_sabado = (isinstance(add_fecha, date) and add_fecha.weekday() == 5)
         colx = st.columns([1, 1])
         with colx[0]:
@@ -177,34 +185,24 @@ with reg_tab:
                 disabled=(disabled or not es_sabado),
             )
 
-        submitted = st.form_submit_button(
-            "💾 Guardar registro",
-            use_container_width=True,
-            disabled=disabled,
-        )
+        submitted = st.form_submit_button("💾 Guardar registro", use_container_width=True, disabled=disabled)
 
-    if submitted and not disabled:
-        if not semana_id:
-            st.error("Primero registra la semana (encargado en la barra lateral).")
-        elif not add_trab:
+    if submitted and not cerrada:
+        if not add_trab:
             st.error("El nombre del trabajador es obligatorio.")
+        elif modo == "Nuevo" and not add_cargo:
+            st.error("Para un trabajador nuevo, el Cargo es obligatorio.")
         else:
-            # Guardar/actualizar catálogo de trabajadores (con cargo)
-            with get_conn() as conn:
-                if sel_nombre == "➕ Agregar nuevo…":
-                    if not add_cargo:
-                        st.error("Por favor, indica el Cargo del nuevo trabajador.")
-                        st.stop()
+            # Guarda/actualiza catálogo (si es nuevo)
+            if modo == "Nuevo":
+                with get_conn() as conn:
                     conn.execute(
                         "INSERT OR IGNORE INTO trabajadores(nombre, cargo) VALUES (?, ?)",
                         (add_trab, add_cargo),
                     )
-                else:
-                    # Si ya existe pero no tenía cargo, no lo tocamos aquí (se podría editar en un módulo aparte)
-                    pass
 
             # Reglas: adicional solo sábado
-            extra_flag  = int(add_extra_flag and (add_fecha.weekday() == 5))
+            extra_flag = int(add_extra_flag and (add_fecha.weekday() == 5))
             extra_monto = float(add_extra_monto if extra_flag else 0)
 
             try:
@@ -214,10 +212,10 @@ with reg_tab:
                         INSERT INTO entradas(semana_id, fecha, trabajador, actividad, monto, extra_sabado, extra_monto)
                         VALUES (?,?,?,?,?,?,?)
                         ON CONFLICT(semana_id, fecha, trabajador) DO UPDATE SET
-                            actividad=excluded.actividad,
-                            monto=excluded.monto,
-                            extra_sabado=excluded.extra_sabado,
-                            extra_monto=excluded.extra_monto
+                          actividad=excluded.actividad,
+                          monto=excluded.monto,
+                          extra_sabado=excluded.extra_sabado,
+                          extra_monto=excluded.extra_monto
                         """,
                         (
                             int(semana_id),
@@ -237,21 +235,19 @@ with reg_tab:
     st.subheader("Vista semanal (Lun–Sáb) por trabajador")
 
     # Cargar registros de la semana (LUN–SÁB)
-    if semana_id:
-        with get_conn() as conn:
-            df_det = pd.read_sql_query(
-                """
-                SELECT e.fecha, e.trabajador, e.actividad, e.monto, e.extra_monto, t.cargo
-                FROM entradas e
-                LEFT JOIN trabajadores t ON t.nombre = e.trabajador
-                WHERE e.semana_id=? AND date(e.fecha) BETWEEN date(?) AND date(?)
-                ORDER BY e.trabajador, date(e.fecha)
-                """,
-                conn,
-                params=(semana_id, sem_ini.isoformat(), sem_fin.isoformat()),
-            )
-    else:
-        df_det = pd.DataFrame()
+    with get_conn() as conn:
+        df_det = pd.read_sql_query(
+            """
+            SELECT e.fecha, e.trabajador, e.actividad, e.monto, e.extra_monto,
+                   COALESCE(t.cargo, '') AS cargo
+            FROM entradas e
+            LEFT JOIN trabajadores t ON t.nombre = e.trabajador
+            WHERE e.semana_id=? AND date(e.fecha) BETWEEN date(?) AND date(?)
+            ORDER BY e.trabajador, date(e.fecha)
+            """,
+            conn,
+            params=(semana_id, sem_ini.isoformat(), sem_fin.isoformat()),
+        )
 
     if df_det.empty:
         st.info("Sin registros en la semana seleccionada.")
@@ -261,7 +257,7 @@ with reg_tab:
         df_det["dow"] = pd.to_datetime(df_det["fecha"]).dt.weekday
 
         df_pivot = (
-            df_det.pivot_table(index="trabajador", columns="dow", values="monto", aggfunc="sum")
+            df_det.pivot_table(index=["trabajador"], columns="dow", values="monto", aggfunc="sum")
             .fillna(0)
         )
         df_pivot = df_pivot.rename(columns={i: label_dow(i) for i in range(6)})
@@ -281,7 +277,7 @@ with reg_tab:
             .reset_index()
         )
 
-        # Cargo por trabajador
+        # Cargo por trabajador (tomar el primero no vacío)
         cargos = (
             df_det.groupby("trabajador")["cargo"]
             .agg(lambda x: next((v for v in x if pd.notna(v) and v != ""), ""))
@@ -290,10 +286,12 @@ with reg_tab:
         )
 
         # Unir todo
-        df_sem = df_pivot.reset_index() \
-            .merge(extras, on="trabajador", how="left") \
-            .merge(dias, on="trabajador", how="left") \
+        df_sem = (
+            df_pivot.reset_index()
+            .merge(extras, on="trabajador", how="left")
+            .merge(dias, on="trabajador", how="left")
             .merge(cargos, on="trabajador", how="left")
+        )
 
         df_sem["monto_extra"] = df_sem["monto_extra"].fillna(0.0)
         df_sem["dias"] = df_sem["dias"].fillna(0).astype(int)
@@ -301,7 +299,7 @@ with reg_tab:
         cols_dias = [c for c in df_sem.columns if c in [label_dow(i) for i in range(6)]]
         df_sem["Total semana"] = df_sem[cols_dias].sum(axis=1) + df_sem["monto_extra"]
 
-        # Reordenar y renombrar para mostrar cargo, dias y monto extra
+        # Reordenar y renombrar (incluye cargo, dias y monto extra)
         columnas = ["trabajador", "cargo"] + cols_dias + ["dias", "monto_extra", "Total semana"]
         df_sem = df_sem[columnas]
         df_sem = df_sem.rename(columns={"monto_extra": "Monto extra"})
@@ -312,45 +310,40 @@ with reg_tab:
 with montos_tab:
     st.subheader("Montos por trabajador y total necesario el sábado")
 
-    if not semana_id:
-        st.info("Registra la semana para ver montos.")
+    with get_conn() as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT e.trabajador,
+                   COALESCE(t.cargo, '') AS cargo,
+                   COUNT(DISTINCT date(e.fecha)) AS dias,
+                   SUM(CASE WHEN strftime('%w', e.fecha) IN ('1','2','3','4','5','6') THEN e.monto ELSE 0 END) AS monto_semana,
+                   MAX(CASE WHEN strftime('%w', e.fecha) = '6' THEN e.extra_monto ELSE 0 END) AS extra_monto
+            FROM entradas e
+            LEFT JOIN trabajadores t ON t.nombre = e.trabajador
+            WHERE e.semana_id=?
+            GROUP BY e.trabajador, t.cargo
+            ORDER BY e.trabajador
+            """,
+            conn,
+            params=(semana_id,),
+        )
+
+    if df.empty:
+        st.info("Sin registros todavía.")
     else:
-        with get_conn() as conn:
-            # LUN–SÁB en SQLite: %w -> 1..6 ; Domingo = 0
-            df = pd.read_sql_query(
-                """
-                SELECT e.trabajador,
-                       t.cargo,
-                       COUNT(DISTINCT date(e.fecha)) AS dias,
-                       SUM(CASE WHEN strftime('%w', e.fecha) IN ('1','2','3','4','5','6') THEN e.monto ELSE 0 END) AS monto_semana,
-                       MAX(CASE WHEN strftime('%w', e.fecha) = '6' THEN e.extra_monto ELSE 0 END) AS extra_monto
-                FROM entradas e
-                LEFT JOIN trabajadores t ON t.nombre = e.trabajador
-                WHERE e.semana_id=?
-                GROUP BY e.trabajador, t.cargo
-                ORDER BY e.trabajador
-                """,
-                conn,
-                params=(semana_id,),
-            )
+        df["Monto adicional"] = df["extra_monto"].fillna(0)
+        df["Total a pagar"] = df["monto_semana"].fillna(0) + df["Monto adicional"]
+        df = df[["trabajador", "cargo", "dias", "Monto adicional", "Total a pagar"]]
+        df["dias"] = df["dias"].fillna(0).astype(int)
 
-        if df.empty:
-            st.info("Sin registros todavía.")
-        else:
-            # Calcular Total a pagar y seleccionar columnas exactas
-            df["Monto adicional"] = df["extra_monto"].fillna(0)
-            df["Total a pagar"] = df["monto_semana"].fillna(0) + df["Monto adicional"]
+        st.dataframe(df, use_container_width=True)
 
-            df = df[["trabajador", "cargo", "dias", "Monto adicional", "Total a pagar"]]
-            df["dias"] = df["dias"].fillna(0).astype(int)
-            st.dataframe(df, use_container_width=True)
+        total_general = float(df["Total a pagar"].sum())
+        st.metric("💰 Efectivo necesario el sábado", total_general)
 
-            total_general = float(df["Total a pagar"].sum())
-            st.metric("💰 Efectivo necesario el sábado", total_general)
-
-            st.download_button(
-                "⬇️ Exportar planilla de pagos (CSV)",
-                data=df.to_csv(index=False).encode("utf-8"),
-                file_name=f"pagos_semana_{sem_ini}_a_{sem_fin}.csv",
-                mime="text/csv",
-            )
+        st.download_button(
+            "⬇️ Exportar planilla de pagos (CSV)",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name=f"pagos_semana_{sem_ini}_a_{sem_fin}.csv",
+            mime="text/csv",
+        )
