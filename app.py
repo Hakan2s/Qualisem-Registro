@@ -116,7 +116,7 @@ else:
 if st.sidebar.button("🧹 Limpiar vista (solo visual)", use_container_width=True):
     st.session_state["limpiar_vista"] = True
     clear_form_state()
-    st.experimental_rerun()
+    st.rerun()  
 
 # -------------------- Tabs --------------------
 reg_tab, montos_tab = st.tabs(["📋 Registros (Lun–Sáb)", "💰 Montos y Total (pago sábado)"])
