@@ -67,16 +67,24 @@ st.session_state["wk_fecha_ref"] = fecha_ref
 sem_ini = monday_of_week(fecha_ref)
 sem_fin = saturday_of_week(fecha_ref)
 
-encargado_input = st.sidebar.text_input("Encargado de la semana", value=st.session_state.get("wk_encargado", ""), key="wk_encargado")
+# Crea/obtiene la semana actual (no forzamos encargado aquí)
+semana_id, encargado_guardado, cerrada = ensure_semana(sem_ini, sem_fin, None)
 
-# Obtén/crea semana
-semana_id, encargado_guardado, cerrada = ensure_semana(sem_ini, sem_fin, encargado_input or None)
+# Input de encargado con KEY distinta a la usada internamente
+encargado_input = st.sidebar.text_input(
+    "Encargado de la semana",
+    value=encargado_guardado or "",
+    key="wk_encargado_input",
+)
 
-# 🔄 Actualiza encargado si cambió y no está vacío
-if encargado_input.strip() and encargado_input.strip() != (encargado_guardado or ""):
+# Si cambió el valor del input vs DB, actualizamos
+if (encargado_input or "") != (encargado_guardado or ""):
     with get_conn() as conn:
-        conn.execute("UPDATE semanas SET encargado=? WHERE id=?", (encargado_input.strip(), int(semana_id)))
-    encargado_guardado = encargado_input.strip()
+        conn.execute(
+            "UPDATE semanas SET encargado=? WHERE id=?",
+            (encargado_input.strip() or "—", int(semana_id)),
+        )
+    encargado_guardado = encargado_input.strip() or "—"
 
 st.sidebar.caption(f"Semana: **{sem_ini} a {sem_fin}** (Lun–Sáb)")
 if cerrada:
@@ -94,12 +102,11 @@ else:
         st.warning("🔒 Semana cerrada correctamente.")
         st.rerun()
 
-# 🆕 Nueva semana: avanza 7 días, crea/selecciona y limpia formularios/vistas
+# Nueva semana: mueve fecha 7 días, limpia inputs y selecciona/crea la nueva
 if st.sidebar.button("🆕 Nueva semana (Lun–Sáb)", use_container_width=True):
     nueva_ref = fecha_ref + timedelta(days=7)
     st.session_state["wk_fecha_ref"] = nueva_ref
-    st.session_state["wk_encargado"] = ""  # limpiar encargado de input para nueva semana
-    clear_form_state()
+    clear_form_state()   # limpiar formularios de pestañas
     ensure_semana(monday_of_week(nueva_ref), saturday_of_week(nueva_ref))
     st.rerun()
 
