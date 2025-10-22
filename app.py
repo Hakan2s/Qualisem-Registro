@@ -1,8 +1,8 @@
 # =============================
 # app.py – QUALISEM G. (registros)
 # Hojas estilo Excel: cada hoja = una semana (LUN–SÁB)
-# trabajador existente/nuevo, "Monto adicional" (solo sábado),
-# cerrar/abrir semana, editor de trabajador y totales
+# Registro diario, adicional solo sábado, abrir/cerrar hoja,
+# editor de trabajadores con borrado de registros y totales.
 # =============================
 import pandas as pd
 import streamlit as st
@@ -62,18 +62,14 @@ def list_hojas():
 # -------------------- Sidebar: selector de HOJA (semana) --------------------
 st.sidebar.title("📄 QUALISEM G. (registros)")
 
-# Estado inicial
+# Estado inicial: asegura al menos la hoja de la semana actual
 if "hoja_id" not in st.session_state:
-    # Asegura al menos la hoja de la semana actual
     ini = monday_of_week(date.today())
     fin = saturday_of_week(date.today())
     sid, _, _ = ensure_semana(ini, fin, None)
     st.session_state["hoja_id"] = int(sid)
 
-# Carga todas las hojas
 df_hojas = list_hojas()
-
-# Si por algún motivo no hay, crea la de hoy
 if df_hojas.empty:
     ini = monday_of_week(date.today())
     fin = saturday_of_week(date.today())
@@ -81,7 +77,6 @@ if df_hojas.empty:
     st.session_state["hoja_id"] = int(sid)
     df_hojas = list_hojas()
 
-# Selector de hoja (semana)
 def hoja_label(row):
     estado = "🔒" if row["cerrada"] else "🟢"
     enc = row["encargado"] or "—"
@@ -89,14 +84,11 @@ def hoja_label(row):
 
 opciones = {hoja_label(r): int(r["id"]) for _, r in df_hojas.iterrows()}
 labels = list(opciones.keys())
-
-# Encontrar label actual
 label_actual = next((k for k,v in opciones.items() if v == st.session_state["hoja_id"]), labels[0])
 
 sel_label = st.sidebar.selectbox("Hoja (semana)", options=labels, index=labels.index(label_actual))
 st.session_state["hoja_id"] = opciones[sel_label]
 
-# Datos de la hoja seleccionada
 row_sel = df_hojas[df_hojas["id"] == st.session_state["hoja_id"]].iloc[0]
 semana_id = int(row_sel["id"])
 sem_ini   = row_sel["semana_inicio"]
@@ -108,7 +100,6 @@ cerrada   = int(row_sel["cerrada"])
 col_nav1, col_nav2, col_nav3 = st.sidebar.columns([1,1,1])
 with col_nav1:
     if st.button("◀ Ant.", use_container_width=True):
-        # Busca anterior por fecha
         idx = df_hojas.index[df_hojas["id"] == semana_id][0]
         if idx + 1 < len(df_hojas):
             st.session_state["hoja_id"] = int(df_hojas.iloc[idx+1]["id"])
@@ -127,9 +118,9 @@ with col_nav3:
             st.session_state["hoja_id"] = int(df_hojas.iloc[idx-1]["id"])
             st.rerun()
 
-# Crear nueva hoja (Lun–Sáb) a partir de fecha
+# Crear nueva hoja (Lun–Sáb)
 st.sidebar.markdown("#### ➕ Nueva hoja (Lun–Sáb)")
-fecha_ref = st.sidebar.date_input("Fecha de referencia", value=sem_fin + timedelta(days=2))  # normalmente saltará a la siguiente
+fecha_ref = st.sidebar.date_input("Fecha de referencia", value=sem_fin + timedelta(days=2))
 if st.sidebar.button("Crear hoja", use_container_width=True):
     ini_n = monday_of_week(fecha_ref)
     fin_n = saturday_of_week(fecha_ref)
@@ -174,7 +165,7 @@ with reg_tab:
 
     disabled = bool(cerrada)
 
-    # Fecha de la hoja (bounds L–S)
+    # Fecha limitada a la hoja L–S
     c1, c2 = st.columns([1, 2])
     with c1:
         add_fecha = st.date_input(
@@ -306,7 +297,7 @@ with reg_tab:
             except Exception as e:
                 st.error(f"Error guardando registro: {e}")
 
-    # Editor de trabajador
+    # ----- Editor de trabajador (con BORRADO de registros) -----
     st.divider()
     st.markdown("### ✏️ Editar trabajador (catálogo)")
     with get_conn() as conn:
@@ -316,7 +307,13 @@ with reg_tab:
 
     if cat_rows:
         nombres_cat = [r["nombre"] for r in cat_rows]
-        sel_edit = st.selectbox("Selecciona trabajador", options=["(Seleccione)"] + nombres_cat, index=0, key=f"edit_trab_sel_{semana_id}")
+        sel_edit = st.selectbox(
+            "Selecciona trabajador",
+            options=["(Seleccione)"] + nombres_cat,
+            index=0,
+            key=f"edit_trab_sel_{semana_id}"
+        )
+
         if sel_edit != "(Seleccione)":
             tr = next(r for r in cat_rows if r["nombre"] == sel_edit)
             c1, c2, c3 = st.columns([1.2, 1, 0.8])
@@ -346,10 +343,80 @@ with reg_tab:
                         conn.execute("UPDATE trabajadores SET activo=0 WHERE id=?", (int(tr["id"]),))
                     st.warning("Trabajador desactivado.")
                     st.rerun()
+
+            # ---- BORRAR REGISTROS DE ESTA HOJA (SEMANA) ----
+            st.markdown("#### 🧹 Registros de esta hoja para este trabajador")
+            with get_conn() as conn:
+                df_regs = pd.read_sql_query(
+                    """
+                    SELECT fecha, actividad, monto, extra_monto
+                    FROM entradas
+                    WHERE semana_id=? AND trabajador=?
+                    ORDER BY date(fecha)
+                    """,
+                    conn,
+                    params=(semana_id, sel_edit),
+                )
+
+            if df_regs.empty:
+                st.info("Sin registros de esta hoja para este trabajador.")
+            else:
+                df_regs["fecha"] = pd.to_datetime(df_regs["fecha"]).dt.date.astype(str)
+                df_regs = df_regs.rename(columns={
+                    "fecha": "Fecha",
+                    "actividad": "Actividad",
+                    "monto": "Monto",
+                    "extra_monto": "Monto adicional"
+                })
+                df_regs["Seleccionar"] = False
+
+                edited = st.data_editor(
+                    df_regs,
+                    key=f"ed_regs_{semana_id}_{sel_edit}",
+                    hide_index=True,
+                    num_rows="fixed",
+                    column_config={
+                        "Fecha": st.column_config.DateColumn("Fecha", format="YYYY-MM-DD"),
+                        "Monto": st.column_config.NumberColumn("Monto", step=1.0, help="Monto del día"),
+                        "Monto adicional": st.column_config.NumberColumn("Monto adicional", step=1.0, help="Solo sábado"),
+                        "Seleccionar": st.column_config.CheckboxColumn("Seleccionar", help="Marca para eliminar"),
+                    }
+                )
+
+                col_del1, col_del2 = st.columns([1, 1])
+                with col_del1:
+                    if st.button("🗑️ Eliminar seleccionados", type="primary", key=f"del_sel_{semana_id}_{sel_edit}"):
+                        fechas_sel = [str(f) for f, s in zip(edited["Fecha"], edited["Seleccionar"]) if s]
+                        if not fechas_sel:
+                            st.warning("No hay filas seleccionadas.")
+                        else:
+                            try:
+                                with get_conn() as conn:
+                                    for f in fechas_sel:
+                                        conn.execute(
+                                            "DELETE FROM entradas WHERE semana_id=? AND trabajador=? AND fecha=?",
+                                            (int(semana_id), sel_edit, f),
+                                        )
+                                st.success(f"Eliminados {len(fechas_sel)} registro(s).")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error al eliminar: {e}")
+                with col_del2:
+                    if st.button("🗑️ Eliminar TODOS los registros de esta hoja", key=f"del_all_{semana_id}_{sel_edit}"):
+                        try:
+                            with get_conn() as conn:
+                                conn.execute(
+                                    "DELETE FROM entradas WHERE semana_id=? AND trabajador=?",
+                                    (int(semana_id), sel_edit),
+                                )
+                            st.warning("Se eliminaron todos los registros de esta hoja para este trabajador.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al eliminar todo: {e}")
     else:
         st.info("Aún no tienes trabajadores en el catálogo.")
 
-    # Vista semanal
+    # ----- Vista semanal -----
     st.divider()
     st.markdown(f"## 📊 Vista semanal (Lun–Sáb) — Hoja {sem_ini} → {sem_fin}")
 
