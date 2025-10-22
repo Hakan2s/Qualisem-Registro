@@ -1,7 +1,8 @@
 # =============================
 # app.py – QUALISEM G. (registros)
-# Planilla LUN–SÁB con abrir/cerrar semana, LIMPIAR/MOSTRAR VISTA,
-# trabajador existente/nuevo, "Monto adicional" consistente y editor de trabajador
+# Hojas estilo Excel: cada hoja = una semana (LUN–SÁB)
+# trabajador existente/nuevo, "Monto adicional" (solo sábado),
+# cerrar/abrir semana, editor de trabajador y totales
 # =============================
 import pandas as pd
 import streamlit as st
@@ -41,89 +42,123 @@ def ensure_semana(ini: date, fin: date, encargado: str | None = None):
             ).fetchone()
         return row["id"], row["encargado"], int(row["cerrada"])
 
-def clear_form_state():
-    for k in [
-        "add_fecha", "modo_trab", "trab_existente", "nuevo_nombre", "nuevo_cargo",
-        "add_monto", "add_act", "add_extra_flag", "add_extra_monto",
-        "edit_trab_sel"
-    ]:
-        if k in st.session_state:
-            del st.session_state[k]
-
-# -------- Flag de vista limpia (solo UI), inicial una vez --------
-if "limpiar_vista" not in st.session_state:
-    st.session_state["limpiar_vista"] = False
-
-# -------------------- Sidebar: QUALISEM G. (registros) --------------------
-st.sidebar.title("📅 QUALISEM G. (registros)")
-
-# Estado inicial (SINCRONIZADO)
-if "wk_fecha_ref" not in st.session_state:
-    st.session_state["wk_fecha_ref"] = date.today()
-if "wk_fecha_ref_input" not in st.session_state:
-    st.session_state["wk_fecha_ref_input"] = st.session_state["wk_fecha_ref"]
-
-# Widget de fecha (misma key siempre)
-fecha_ref = st.sidebar.date_input(
-    "Semana de referencia (cualquier día)",
-    value=st.session_state["wk_fecha_ref_input"],
-    key="wk_fecha_ref_input",
-)
-
-# Sincroniza variable interna con el widget
-if st.session_state["wk_fecha_ref"] != fecha_ref:
-    st.session_state["wk_fecha_ref"] = fecha_ref
-    # Cambiar de semana sale del modo "vista limpia"
-    st.session_state["limpiar_vista"] = False
-
-# Fechas LUN–SÁB
-sem_ini = monday_of_week(st.session_state["wk_fecha_ref"])
-sem_fin = saturday_of_week(st.session_state["wk_fecha_ref"])
-
-# Crea/obtiene la semana actual
-semana_id, encargado_guardado, cerrada = ensure_semana(sem_ini, sem_fin, None)
-
-# Input de encargado (key distinta)
-encargado_input = st.sidebar.text_input(
-    "Encargado de la semana",
-    value=encargado_guardado or "",
-    key="wk_encargado_input",
-)
-# Si cambió, actualiza DB
-if (encargado_input or "") != (encargado_guardado or ""):
+def list_hojas():
+    """Devuelve DataFrame de semanas como 'hojas' ordenadas desc por inicio."""
     with get_conn() as conn:
-        conn.execute(
-            "UPDATE semanas SET encargado=? WHERE id=?",
-            (encargado_input.strip() or "—", int(semana_id)),
+        df = pd.read_sql_query(
+            """
+            SELECT id, semana_inicio, semana_fin, encargado, cerrada
+            FROM semanas
+            ORDER BY date(semana_inicio) DESC
+            """,
+            conn,
         )
+    if df.empty:
+        return pd.DataFrame(columns=["id","semana_inicio","semana_fin","encargado","cerrada"])
+    df["semana_inicio"] = pd.to_datetime(df["semana_inicio"]).dt.date
+    df["semana_fin"]    = pd.to_datetime(df["semana_fin"]).dt.date
+    return df
+
+# -------------------- Sidebar: selector de HOJA (semana) --------------------
+st.sidebar.title("📄 QUALISEM G. (registros)")
+
+# Estado inicial
+if "hoja_id" not in st.session_state:
+    # Asegura al menos la hoja de la semana actual
+    ini = monday_of_week(date.today())
+    fin = saturday_of_week(date.today())
+    sid, _, _ = ensure_semana(ini, fin, None)
+    st.session_state["hoja_id"] = int(sid)
+
+# Carga todas las hojas
+df_hojas = list_hojas()
+
+# Si por algún motivo no hay, crea la de hoy
+if df_hojas.empty:
+    ini = monday_of_week(date.today())
+    fin = saturday_of_week(date.today())
+    sid, _, _ = ensure_semana(ini, fin, None)
+    st.session_state["hoja_id"] = int(sid)
+    df_hojas = list_hojas()
+
+# Selector de hoja (semana)
+def hoja_label(row):
+    estado = "🔒" if row["cerrada"] else "🟢"
+    enc = row["encargado"] or "—"
+    return f"{row['semana_inicio']} → {row['semana_fin']}  | Enc: {enc} {estado}"
+
+opciones = {hoja_label(r): int(r["id"]) for _, r in df_hojas.iterrows()}
+labels = list(opciones.keys())
+
+# Encontrar label actual
+label_actual = next((k for k,v in opciones.items() if v == st.session_state["hoja_id"]), labels[0])
+
+sel_label = st.sidebar.selectbox("Hoja (semana)", options=labels, index=labels.index(label_actual))
+st.session_state["hoja_id"] = opciones[sel_label]
+
+# Datos de la hoja seleccionada
+row_sel = df_hojas[df_hojas["id"] == st.session_state["hoja_id"]].iloc[0]
+semana_id = int(row_sel["id"])
+sem_ini   = row_sel["semana_inicio"]
+sem_fin   = row_sel["semana_fin"]
+encargado_guardado = row_sel["encargado"] or "—"
+cerrada   = int(row_sel["cerrada"])
+
+# Navegación rápida
+col_nav1, col_nav2, col_nav3 = st.sidebar.columns([1,1,1])
+with col_nav1:
+    if st.button("◀ Ant.", use_container_width=True):
+        # Busca anterior por fecha
+        idx = df_hojas.index[df_hojas["id"] == semana_id][0]
+        if idx + 1 < len(df_hojas):
+            st.session_state["hoja_id"] = int(df_hojas.iloc[idx+1]["id"])
+            st.rerun()
+with col_nav2:
+    if st.button("Hoy", use_container_width=True):
+        ini = monday_of_week(date.today())
+        fin = saturday_of_week(date.today())
+        sid, _, _ = ensure_semana(ini, fin, None)
+        st.session_state["hoja_id"] = int(sid)
+        st.rerun()
+with col_nav3:
+    if st.button("Sig. ▶", use_container_width=True):
+        idx = df_hojas.index[df_hojas["id"] == semana_id][0]
+        if idx - 1 >= 0:
+            st.session_state["hoja_id"] = int(df_hojas.iloc[idx-1]["id"])
+            st.rerun()
+
+# Crear nueva hoja (Lun–Sáb) a partir de fecha
+st.sidebar.markdown("#### ➕ Nueva hoja (Lun–Sáb)")
+fecha_ref = st.sidebar.date_input("Fecha de referencia", value=sem_fin + timedelta(days=2))  # normalmente saltará a la siguiente
+if st.sidebar.button("Crear hoja", use_container_width=True):
+    ini_n = monday_of_week(fecha_ref)
+    fin_n = saturday_of_week(fecha_ref)
+    sid_n, _, _ = ensure_semana(ini_n, fin_n, None)
+    st.session_state["hoja_id"] = int(sid_n)
+    st.success(f"Hoja creada: {ini_n} → {fin_n}")
+    st.rerun()
+
+# Encargado + estado de la HOJA actual
+st.sidebar.caption(f"Hoja: **{sem_ini} → {sem_fin}** (Lun–Sáb)")
+encargado_input = st.sidebar.text_input("Encargado de la semana", value=encargado_guardado, key="wk_encargado_input")
+if (encargado_input or "—") != encargado_guardado:
+    with get_conn() as conn:
+        conn.execute("UPDATE semanas SET encargado=? WHERE id=?", (encargado_input.strip() or "—", int(semana_id)))
     encargado_guardado = encargado_input.strip() or "—"
 
-st.sidebar.caption(f"Semana: **{sem_ini} a {sem_fin}** (Lun–Sáb)")
 if cerrada:
-    st.sidebar.error(f"Semana CERRADA. Encargado: {encargado_guardado or '—'}")
-    if st.sidebar.button("🔓 Abrir semana", use_container_width=True):
+    st.sidebar.error(f"Semana CERRADA. Encargado: {encargado_guardado}")
+    if st.sidebar.button("🔓 Abrir hoja", use_container_width=True):
         with get_conn() as conn:
             conn.execute("UPDATE semanas SET cerrada=0 WHERE id=?", (int(semana_id),))
-        st.success("✅ Semana abierta nuevamente.")
+        st.success("✅ Hoja abierta.")
         st.rerun()
 else:
-    st.sidebar.success(f"Semana ABIERTA. Encargado: {encargado_guardado or '—'}")
-    if st.sidebar.button("🔒 Cerrar semana", use_container_width=True):
+    st.sidebar.success(f"Semana ABIERTA. Encargado: {encargado_guardado}")
+    if st.sidebar.button("🔒 Cerrar hoja", use_container_width=True):
         with get_conn() as conn:
             conn.execute("UPDATE semanas SET cerrada=1 WHERE id=?", (int(semana_id),))
-        st.warning("🔒 Semana cerrada correctamente.")
-        st.rerun()
-
-# 🧹 Limpiar / 👁️ Mostrar datos (solo visual)
-c_v1, c_v2 = st.sidebar.columns(2)
-with c_v1:
-    if st.button("🧹 Limpiar vista", use_container_width=True):
-        st.session_state["limpiar_vista"] = True
-        clear_form_state()
-        st.rerun()
-with c_v2:
-    if st.button("👁️ Mostrar datos", use_container_width=True):
-        st.session_state["limpiar_vista"] = False
+        st.warning("🔒 Hoja cerrada.")
         st.rerun()
 
 # -------------------- Tabs --------------------
@@ -131,37 +166,32 @@ reg_tab, montos_tab = st.tabs(["📋 Registros (Lun–Sáb)", "💰 Montos y Tot
 
 # -------------------- TAB 1 – Registros --------------------
 with reg_tab:
-    st.markdown("## 📋 Registros (Lunes a Sábado)")
-
-    # Si la vista está limpia, no renderizamos más en esta pestaña
-    if st.session_state.get("limpiar_vista", False):
-        st.info("🧹 Vista limpia: comienza a registrar. Los datos se mostrarán al guardar un registro o pulsar «Mostrar datos».")
-        st.stop()
-
+    st.markdown(f"## 📋 Registros (Lunes a Sábado) — Hoja {sem_ini} → {sem_fin}")
     st.subheader("Registrar día por trabajador")
 
     if cerrada:
-        st.info("🔒 Esta semana está cerrada. No se permiten altas ni ediciones.")
+        st.info("🔒 Esta hoja está cerrada. No se permiten altas ni ediciones.")
 
-    # ==== Captura reactiva (sin form) ====
     disabled = bool(cerrada)
 
+    # Fecha de la hoja (bounds L–S)
     c1, c2 = st.columns([1, 2])
     with c1:
         add_fecha = st.date_input(
             "Fecha",
-            value=st.session_state.get("add_fecha", sem_ini),
+            value=monday_of_week(sem_ini),
             min_value=sem_ini,
             max_value=sem_fin,
-            key="add_fecha",
+            key=f"add_fecha_{semana_id}",
             disabled=disabled,
         )
 
+    # Modo trabajador
     modo = st.radio(
         "Modo de trabajador",
         ["Existente", "Nuevo"],
         horizontal=True,
-        key="modo_trab",
+        key=f"modo_trab_{semana_id}",
         disabled=disabled,
     )
 
@@ -180,25 +210,17 @@ with reg_tab:
             "Trabajador (autocompletar)",
             options=["(Seleccione)"] + nombres,
             index=0,
-            key="trab_existente",
+            key=f"trab_existente_{semana_id}",
             disabled=disabled,
         )
 
         coln1, coln2 = st.columns(2)
         with coln1:
-            st.text_input(
-                "Nombre",
-                value=sel_trab if sel_trab != "(Seleccione)" else "",
-                disabled=True,
-                key="readonly_nombre",
-            )
+            st.text_input("Nombre", value=sel_trab if sel_trab != "(Seleccione)" else "",
+                          disabled=True, key=f"readonly_nombre_{semana_id}")
         with coln2:
-            st.text_input(
-                "Cargo",
-                value=cargos_map.get(sel_trab, "") if sel_trab != "(Seleccione)" else "",
-                disabled=True,
-                key="readonly_cargo",
-            )
+            st.text_input("Cargo", value=cargos_map.get(sel_trab, "") if sel_trab != "(Seleccione)" else "",
+                          disabled=True, key=f"readonly_cargo_{semana_id}")
 
         if sel_trab != "(Seleccione)":
             add_trab = sel_trab
@@ -207,43 +229,40 @@ with reg_tab:
     else:
         coln1, coln2 = st.columns(2)
         with coln1:
-            add_trab = st.text_input("Nombre (nuevo)", key="nuevo_nombre", disabled=disabled).strip()
+            add_trab = st.text_input("Nombre (nuevo)", key=f"nuevo_nombre_{semana_id}", disabled=disabled).strip()
         with coln2:
-            add_cargo = st.text_input("Cargo", key="nuevo_cargo", disabled=disabled).strip()
+            add_cargo = st.text_input("Cargo", key=f"nuevo_cargo_{semana_id}", disabled=disabled).strip()
 
     # Monto y actividad
     col3, col4 = st.columns(2)
     with col3:
         add_monto = st.number_input(
-            "Monto del día (S/)", min_value=0.0, step=1.0,
-            value=st.session_state.get("add_monto", 0.0),
-            key="add_monto", disabled=disabled
+            "Monto del día (S/)", min_value=0.0, step=1.0, value=0.0,
+            key=f"add_monto_{semana_id}", disabled=disabled
         )
     with col4:
-        add_act = st.text_input("Actividad (opcional)", key="add_act", disabled=disabled)
+        add_act = st.text_input("Actividad (opcional)", key=f"add_act_{semana_id}", disabled=disabled)
 
-    # Adicional sábado (en vivo)
+    # Adicional sábado
     es_sabado = (isinstance(add_fecha, date) and add_fecha.weekday() == 5)
     colx = st.columns([1, 1])
     with colx[0]:
         add_extra_flag = st.checkbox(
             "Pago adicional de sábado",
-            value=st.session_state.get("add_extra_flag", False),
-            key="add_extra_flag",
+            value=False,
+            key=f"add_extra_flag_{semana_id}",
             disabled=(disabled or not es_sabado),
         )
     with colx[1]:
         add_extra_monto = st.number_input(
             "Monto adicional (solo sábado)",
-            min_value=0.0, step=1.0,
-            value=st.session_state.get("add_extra_monto", 0.0),
-            key="add_extra_monto",
+            min_value=0.0, step=1.0, value=0.0,
+            key=f"add_extra_monto_{semana_id}",
             disabled=(disabled or not es_sabado),
         )
 
-    guardar = st.button("💾 Guardar registro", use_container_width=True, disabled=disabled)
+    guardar = st.button("💾 Guardar registro", use_container_width=True, disabled=disabled, key=f"btn_guardar_{semana_id}")
 
-    # Guardar
     if guardar and not cerrada:
         if not add_trab:
             st.error("El nombre del trabajador es obligatorio.")
@@ -257,9 +276,7 @@ with reg_tab:
                         (add_trab, add_cargo),
                     )
 
-            # Si es sábado y hay monto > 0, forzar flag
-            extra_flag = 1 if (es_sabado and float(add_extra_monto or 0) > 0) \
-                           else int(bool(add_extra_flag) and es_sabado)
+            extra_flag = 1 if (es_sabado and float(add_extra_monto or 0) > 0) else int(bool(add_extra_flag) and es_sabado)
             extra_monto = float(add_extra_monto if extra_flag else 0)
 
             try:
@@ -285,14 +302,11 @@ with reg_tab:
                         ),
                     )
                 st.success("Registro guardado/actualizado.")
-                # Al guardar, salimos del modo "vista limpia"
-                st.session_state["limpiar_vista"] = False
-                clear_form_state()
                 st.rerun()
             except Exception as e:
                 st.error(f"Error guardando registro: {e}")
 
-    # ----- Editor simple de trabajador -----
+    # Editor de trabajador
     st.divider()
     st.markdown("### ✏️ Editar trabajador (catálogo)")
     with get_conn() as conn:
@@ -302,7 +316,7 @@ with reg_tab:
 
     if cat_rows:
         nombres_cat = [r["nombre"] for r in cat_rows]
-        sel_edit = st.selectbox("Selecciona trabajador", options=["(Seleccione)"] + nombres_cat, index=0, key="edit_trab_sel")
+        sel_edit = st.selectbox("Selecciona trabajador", options=["(Seleccione)"] + nombres_cat, index=0, key=f"edit_trab_sel_{semana_id}")
         if sel_edit != "(Seleccione)":
             tr = next(r for r in cat_rows if r["nombre"] == sel_edit)
             c1, c2, c3 = st.columns([1.2, 1, 0.8])
@@ -335,9 +349,9 @@ with reg_tab:
     else:
         st.info("Aún no tienes trabajadores en el catálogo.")
 
-    # ----- Vista semanal -----
+    # Vista semanal
     st.divider()
-    st.markdown("## 📊 Vista semanal (Lun–Sáb) por trabajador")
+    st.markdown(f"## 📊 Vista semanal (Lun–Sáb) — Hoja {sem_ini} → {sem_fin}")
 
     with get_conn() as conn:
         df_det = pd.read_sql_query(
@@ -354,29 +368,22 @@ with reg_tab:
         )
 
     if df_det.empty:
-        st.info("Sin registros en la semana seleccionada.")
+        st.info("Sin registros en esta hoja.")
     else:
         df_det["fecha"] = pd.to_datetime(df_det["fecha"]).dt.date
         df_det["dow"] = pd.to_datetime(df_det["fecha"]).dt.weekday
 
-        # Montos por día LUN–SÁB
         df_pivot = df_det.pivot_table(index=["trabajador"], columns="dow", values="monto", aggfunc="sum").fillna(0)
         df_pivot = df_pivot.rename(columns={i: label_dow(i) for i in range(6)})
 
-        # Monto adicional (sábado): SUMA
         extras = (
             df_det[df_det["dow"] == 5]
             .groupby("trabajador", as_index=False)
             .agg(monto_adicional=("extra_monto", "sum"))
         )
-
-        # Días trabajados (fechas únicas)
         dias = df_det.groupby("trabajador")["fecha"].nunique().rename("dias").reset_index()
-
-        # Cargo por trabajador
         cargos = df_det.groupby("trabajador")["cargo"].agg(lambda x: next((v for v in x if v), "")).rename("cargo").reset_index()
 
-        # Unir
         df_sem = (
             df_pivot.reset_index()
             .merge(extras, on="trabajador", how="left")
@@ -396,12 +403,7 @@ with reg_tab:
 
 # -------------------- TAB 2 – Montos y Total (pago sábado) --------------------
 with montos_tab:
-    st.markdown("## 💰 Montos y Total (pago sábado)")
-
-    # Si la vista está limpia, salir antes de consultar
-    if st.session_state.get("limpiar_vista", False):
-        st.info("🧹 Vista limpia: sin datos para mostrar hasta que guardes un registro o pulses «Mostrar datos».")
-        st.stop()
+    st.markdown(f"## 💰 Montos y Total (pago sábado) — Hoja {sem_ini} → {sem_fin}")
 
     with get_conn() as conn:
         df = pd.read_sql_query(
@@ -422,7 +424,7 @@ with montos_tab:
         )
 
     if df.empty:
-        st.info("Sin registros todavía.")
+        st.info("Sin registros en esta hoja.")
     else:
         df["Monto adicional"] = df["monto_adicional"].fillna(0)
         df["Total a pagar"] = df["monto_semana"].fillna(0) + df["Monto adicional"]
