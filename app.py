@@ -1,5 +1,5 @@
 # =============================
-# app.py – Planilla LUN–SÁB con cierre/abrir semana y autocomplete de trabajadores
+# app.py – Planilla LUN–SÁB con abrir/cerrar semana, autocomplete y cargo
 # =============================
 import pandas as pd
 import streamlit as st
@@ -43,7 +43,7 @@ encargado_input = st.sidebar.text_input(
     key="wk_encargado",
 )
 
-# Crear/obtener semana (compat: si no existe LUN–SÁB, buscamos LUN–DOM de semanas antiguas)
+# Crear/obtener semana (compat: si no existe LUN–SÁB, busca LUN–DOM de semanas antiguas)
 with get_conn() as conn:
     row = conn.execute(
         "SELECT id, encargado, cerrada FROM semanas WHERE semana_inicio=? AND semana_fin=?",
@@ -51,7 +51,7 @@ with get_conn() as conn:
     ).fetchone()
 
     if row is None:
-        dom = sem_ini + timedelta(days=6)  # compat semanas antiguas LUN–DOM
+        dom = sem_ini + timedelta(days=6)  # compat LUN–DOM
         row = conn.execute(
             "SELECT id, encargado, cerrada FROM semanas WHERE semana_inicio=? AND semana_fin=?",
             (sem_ini.isoformat(), dom.isoformat()),
@@ -117,11 +117,13 @@ with reg_tab:
         with c2:
             # Autocomplete de trabajadores desde catálogo
             with get_conn() as conn:
-                nombres = [r["nombre"] for r in conn.execute(
-                    "SELECT nombre FROM trabajadores WHERE activo=1 ORDER BY nombre"
-                ).fetchall()]
-            opciones = ["— Escribe nombre —", *nombres, "➕ Agregar nuevo…"]
+                rows = conn.execute(
+                    "SELECT nombre, COALESCE(cargo, '') AS cargo FROM trabajadores WHERE activo=1 ORDER BY nombre"
+                ).fetchall()
+            nombres = [r["nombre"] for r in rows]
+            cargos_map = {r["nombre"]: r["cargo"] for r in rows}
 
+            opciones = ["— Escribe nombre —", *nombres, "➕ Agregar nuevo…"]
             sel_nombre = st.selectbox(
                 "Trabajador (autocompletar)",
                 options=opciones,
@@ -132,11 +134,16 @@ with reg_tab:
 
             if sel_nombre == "➕ Agregar nuevo…":
                 add_trab_new = st.text_input("Nuevo trabajador", key="add_trab_new", disabled=disabled)
+                add_cargo_new = st.text_input("Cargo", key="add_cargo_new", disabled=disabled)
                 add_trab = add_trab_new.strip() if add_trab_new else ""
+                add_cargo = add_cargo_new.strip() if add_cargo_new else ""
             elif sel_nombre == "— Escribe nombre —":
                 add_trab = ""
+                add_cargo = ""
             else:
                 add_trab = sel_nombre
+                add_cargo = cargos_map.get(sel_nombre, "")
+                st.text_input("Cargo", value=add_cargo, disabled=True, key="cargo_existente")
 
         with c3:
             add_monto = st.number_input(
@@ -182,9 +189,19 @@ with reg_tab:
         elif not add_trab:
             st.error("El nombre del trabajador es obligatorio.")
         else:
-            # Guardar/actualizar catálogo de trabajadores
+            # Guardar/actualizar catálogo de trabajadores (con cargo)
             with get_conn() as conn:
-                conn.execute("INSERT OR IGNORE INTO trabajadores(nombre) VALUES (?)", (add_trab,))
+                if sel_nombre == "➕ Agregar nuevo…":
+                    if not add_cargo:
+                        st.error("Por favor, indica el Cargo del nuevo trabajador.")
+                        st.stop()
+                    conn.execute(
+                        "INSERT OR IGNORE INTO trabajadores(nombre, cargo) VALUES (?, ?)",
+                        (add_trab, add_cargo),
+                    )
+                else:
+                    # Si ya existe pero no tenía cargo, no lo tocamos aquí (se podría editar en un módulo aparte)
+                    pass
 
             # Reglas: adicional solo sábado
             extra_flag  = int(add_extra_flag and (add_fecha.weekday() == 5))
@@ -224,10 +241,11 @@ with reg_tab:
         with get_conn() as conn:
             df_det = pd.read_sql_query(
                 """
-                SELECT fecha, trabajador, actividad, monto, extra_sabado, extra_monto
-                FROM entradas
-                WHERE semana_id=? AND date(fecha) BETWEEN date(?) AND date(?)
-                ORDER BY trabajador, date(fecha)
+                SELECT e.fecha, e.trabajador, e.actividad, e.monto, e.extra_monto, t.cargo
+                FROM entradas e
+                LEFT JOIN trabajadores t ON t.nombre = e.trabajador
+                WHERE e.semana_id=? AND date(e.fecha) BETWEEN date(?) AND date(?)
+                ORDER BY e.trabajador, date(e.fecha)
                 """,
                 conn,
                 params=(semana_id, sem_ini.isoformat(), sem_fin.isoformat()),
@@ -241,24 +259,52 @@ with reg_tab:
         # Tabla pivot Lunes–Sábado
         df_det["fecha"] = pd.to_datetime(df_det["fecha"]).dt.date
         df_det["dow"] = pd.to_datetime(df_det["fecha"]).dt.weekday
+
         df_pivot = (
             df_det.pivot_table(index="trabajador", columns="dow", values="monto", aggfunc="sum")
             .fillna(0)
         )
         df_pivot = df_pivot.rename(columns={i: label_dow(i) for i in range(6)})
 
-        # Extras del sábado (máximo por trabajador)
+        # Monto extra (solo sábado) -> una sola columna "Monto extra"
         extras = (
             df_det[df_det["dow"] == 5]
             .groupby("trabajador", as_index=False)
-            .agg(extra_sabado=("extra_sabado", "max"), extra_monto=("extra_monto", "max"))
+            .agg(monto_extra=("extra_monto", "max"))
         )
 
-        df_sem = df_pivot.reset_index().merge(extras, on="trabajador", how="left")
-        df_sem["extra_sabado"] = df_sem["extra_sabado"].fillna(0).astype(int)
-        df_sem["extra_monto"] = df_sem["extra_monto"].fillna(0.0)
+        # Días asistidos (fechas únicas LUN–SÁB)
+        dias = (
+            df_det.groupby("trabajador")["fecha"]
+            .nunique()
+            .rename("dias")
+            .reset_index()
+        )
+
+        # Cargo por trabajador
+        cargos = (
+            df_det.groupby("trabajador")["cargo"]
+            .agg(lambda x: next((v for v in x if pd.notna(v) and v != ""), ""))
+            .rename("cargo")
+            .reset_index()
+        )
+
+        # Unir todo
+        df_sem = df_pivot.reset_index() \
+            .merge(extras, on="trabajador", how="left") \
+            .merge(dias, on="trabajador", how="left") \
+            .merge(cargos, on="trabajador", how="left")
+
+        df_sem["monto_extra"] = df_sem["monto_extra"].fillna(0.0)
+        df_sem["dias"] = df_sem["dias"].fillna(0).astype(int)
+
         cols_dias = [c for c in df_sem.columns if c in [label_dow(i) for i in range(6)]]
-        df_sem["Total semana"] = df_sem[cols_dias].sum(axis=1) + df_sem["extra_monto"]
+        df_sem["Total semana"] = df_sem[cols_dias].sum(axis=1) + df_sem["monto_extra"]
+
+        # Reordenar y renombrar para mostrar cargo, dias y monto extra
+        columnas = ["trabajador", "cargo"] + cols_dias + ["dias", "monto_extra", "Total semana"]
+        df_sem = df_sem[columnas]
+        df_sem = df_sem.rename(columns={"monto_extra": "Monto extra"})
 
         st.dataframe(df_sem, use_container_width=True)
 
@@ -273,14 +319,16 @@ with montos_tab:
             # LUN–SÁB en SQLite: %w -> 1..6 ; Domingo = 0
             df = pd.read_sql_query(
                 """
-                SELECT trabajador,
-                       SUM(CASE WHEN strftime('%w', fecha) IN ('1','2','3','4','5','6') THEN monto ELSE 0 END) AS monto_semana,
-                       MAX(CASE WHEN strftime('%w', fecha) = '6' THEN extra_sabado ELSE 0 END) AS extra_flag,
-                       MAX(CASE WHEN strftime('%w', fecha) = '6' THEN extra_monto ELSE 0 END) AS extra_monto
-                FROM entradas
-                WHERE semana_id=?
-                GROUP BY trabajador
-                ORDER BY trabajador
+                SELECT e.trabajador,
+                       t.cargo,
+                       COUNT(DISTINCT date(e.fecha)) AS dias,
+                       SUM(CASE WHEN strftime('%w', e.fecha) IN ('1','2','3','4','5','6') THEN e.monto ELSE 0 END) AS monto_semana,
+                       MAX(CASE WHEN strftime('%w', e.fecha) = '6' THEN e.extra_monto ELSE 0 END) AS extra_monto
+                FROM entradas e
+                LEFT JOIN trabajadores t ON t.nombre = e.trabajador
+                WHERE e.semana_id=?
+                GROUP BY e.trabajador, t.cargo
+                ORDER BY e.trabajador
                 """,
                 conn,
                 params=(semana_id,),
@@ -289,22 +337,16 @@ with montos_tab:
         if df.empty:
             st.info("Sin registros todavía.")
         else:
-            df["Subtotal (Lun–Sáb)"] = df["monto_semana"].fillna(0)
-            df["Monto adicional"]     = df["extra_monto"].fillna(0)
-            df["Adicional sábado"]    = df["extra_flag"].fillna(0).astype(int)
-            df["Total a pagar"]       = df["Subtotal (Lun–Sáb)"] + df["Monto adicional"]
+            # Calcular Total a pagar y seleccionar columnas exactas
+            df["Monto adicional"] = df["extra_monto"].fillna(0)
+            df["Total a pagar"] = df["monto_semana"].fillna(0) + df["Monto adicional"]
 
-            df = df[["trabajador", "Subtotal (Lun–Sáb)", "Adicional sábado", "Monto adicional", "Total a pagar"]]
+            df = df[["trabajador", "cargo", "dias", "Monto adicional", "Total a pagar"]]
+            df["dias"] = df["dias"].fillna(0).astype(int)
             st.dataframe(df, use_container_width=True)
 
             total_general = float(df["Total a pagar"].sum())
-            colA, colB, colC = st.columns(3)
-            with colA:
-                st.metric("Total trabajadores", len(df))
-            with colB:
-                st.metric("Total adicional sábado", float(df["Monto adicional"].sum()))
-            with colC:
-                st.metric("💰 Efectivo necesario el sábado", total_general)
+            st.metric("💰 Efectivo necesario el sábado", total_general)
 
             st.download_button(
                 "⬇️ Exportar planilla de pagos (CSV)",
