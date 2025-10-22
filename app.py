@@ -361,7 +361,8 @@ with reg_tab:
             if df_regs.empty:
                 st.info("Sin registros de esta hoja para este trabajador.")
             else:
-                df_regs["fecha"] = pd.to_datetime(df_regs["fecha"]).dt.date.astype(str)
+                # Mantener fecha como datetime.date (NO string)
+                df_regs["fecha"] = pd.to_datetime(df_regs["fecha"]).dt.date
                 df_regs = df_regs.rename(columns={
                     "fecha": "Fecha",
                     "actividad": "Actividad",
@@ -377,6 +378,7 @@ with reg_tab:
                     num_rows="fixed",
                     column_config={
                         "Fecha": st.column_config.DateColumn("Fecha", format="YYYY-MM-DD"),
+                        "Actividad": st.column_config.TextColumn("Actividad"),
                         "Monto": st.column_config.NumberColumn("Monto", step=1.0, help="Monto del día"),
                         "Monto adicional": st.column_config.NumberColumn("Monto adicional", step=1.0, help="Solo sábado"),
                         "Seleccionar": st.column_config.CheckboxColumn("Seleccionar", help="Marca para eliminar"),
@@ -386,7 +388,8 @@ with reg_tab:
                 col_del1, col_del2 = st.columns([1, 1])
                 with col_del1:
                     if st.button("🗑️ Eliminar seleccionados", type="primary", key=f"del_sel_{semana_id}_{sel_edit}"):
-                        fechas_sel = [str(f) for f, s in zip(edited["Fecha"], edited["Seleccionar"]) if s]
+                        # edited["Fecha"] es datetime.date -> ISO para el DELETE
+                        fechas_sel = [f.isoformat() for f, s in zip(edited["Fecha"], edited["Seleccionar"]) if s]
                         if not fechas_sel:
                             st.warning("No hay filas seleccionadas.")
                         else:
