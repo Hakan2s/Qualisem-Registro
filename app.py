@@ -53,31 +53,37 @@ def clear_form_state():
 # -------------------- Sidebar: QUALISEM G. (registros) --------------------
 st.sidebar.title("📅 QUALISEM G. (registros)")
 
-# Estado inicial de la fecha de referencia
+# Estado inicial (SINCRONIZADO)
 if "wk_fecha_ref" not in st.session_state:
     st.session_state["wk_fecha_ref"] = date.today()
+if "wk_fecha_ref_input" not in st.session_state:
+    st.session_state["wk_fecha_ref_input"] = st.session_state["wk_fecha_ref"]
 
+# Widget de fecha SIEMPRE lee/escribe la misma key
 fecha_ref = st.sidebar.date_input(
     "Semana de referencia (cualquier día)",
-    value=st.session_state["wk_fecha_ref"],
+    value=st.session_state["wk_fecha_ref_input"],
     key="wk_fecha_ref_input",
 )
-st.session_state["wk_fecha_ref"] = fecha_ref
 
-sem_ini = monday_of_week(fecha_ref)
-sem_fin = saturday_of_week(fecha_ref)
+# Sincroniza variable interna con el widget
+if st.session_state["wk_fecha_ref"] != fecha_ref:
+    st.session_state["wk_fecha_ref"] = fecha_ref
+
+# Fechas LUN–SÁB
+sem_ini = monday_of_week(st.session_state["wk_fecha_ref"])
+sem_fin = saturday_of_week(st.session_state["wk_fecha_ref"])
 
 # Crea/obtiene la semana actual (no forzamos encargado aquí)
 semana_id, encargado_guardado, cerrada = ensure_semana(sem_ini, sem_fin, None)
 
-# Input de encargado con KEY distinta a la usada internamente
+# Input de encargado (key distinta a las de fecha)
 encargado_input = st.sidebar.text_input(
     "Encargado de la semana",
     value=encargado_guardado or "",
     key="wk_encargado_input",
 )
-
-# Si cambió el valor del input vs DB, actualizamos
+# Si cambió, actualiza DB
 if (encargado_input or "") != (encargado_guardado or ""):
     with get_conn() as conn:
         conn.execute(
@@ -102,11 +108,12 @@ else:
         st.warning("🔒 Semana cerrada correctamente.")
         st.rerun()
 
-# Nueva semana: mueve fecha 7 días, limpia inputs y selecciona/crea la nueva
+# 🆕 Nueva semana: avanza 7 días y ACTUALIZA AMBAS KEYS antes del rerun
 if st.sidebar.button("🆕 Nueva semana (Lun–Sáb)", use_container_width=True):
-    nueva_ref = fecha_ref + timedelta(days=7)
+    nueva_ref = st.session_state["wk_fecha_ref"] + timedelta(days=7)
     st.session_state["wk_fecha_ref"] = nueva_ref
-    clear_form_state()   # limpiar formularios de pestañas
+    st.session_state["wk_fecha_ref_input"] = nueva_ref   # <— sincroniza el widget
+    clear_form_state()                                    # limpia entradas y selects
     ensure_semana(monday_of_week(nueva_ref), saturday_of_week(nueva_ref))
     st.rerun()
 
