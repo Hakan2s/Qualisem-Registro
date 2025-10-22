@@ -1,5 +1,6 @@
 # =============================
-# app.py – Planilla LUN–SÁB con abrir/cerrar semana, NUEVA SEMANA,
+# app.py – QUALISEM G. (registros)
+# Planilla LUN–SÁB con abrir/cerrar semana, NUEVA SEMANA,
 # trabajador existente/nuevo, "Monto adicional" consistente y editor de trabajador
 # =============================
 import pandas as pd
@@ -8,7 +9,7 @@ from datetime import date, timedelta
 
 from db import get_conn, init_db
 
-st.set_page_config(page_title="Planilla semanal – Lunes a Sábado", layout="wide")
+st.set_page_config(page_title="QUALISEM G. (registros)", layout="wide")
 init_db()
 
 # -------------------- Utilidades (LUN–SÁB) --------------------
@@ -40,9 +41,19 @@ def ensure_semana(ini: date, fin: date, encargado: str | None = None):
             ).fetchone()
         return row["id"], row["encargado"], int(row["cerrada"])
 
-# -------------------- Sidebar: semana + encargado + abrir/cerrar + nueva semana --------------------
-st.sidebar.title("🗓️ Semana & Encargado")
+def clear_form_state():
+    for k in [
+        "add_fecha", "modo_trab", "trab_existente", "nuevo_nombre", "nuevo_cargo",
+        "add_monto", "add_act", "add_extra_flag", "add_extra_monto",
+        "edit_trab_sel"
+    ]:
+        if k in st.session_state:
+            del st.session_state[k]
 
+# -------------------- Sidebar: QUALISEM G. (registros) --------------------
+st.sidebar.title("📅 QUALISEM G. (registros)")
+
+# Estado inicial de la fecha de referencia
 if "wk_fecha_ref" not in st.session_state:
     st.session_state["wk_fecha_ref"] = date.today()
 
@@ -56,52 +67,54 @@ st.session_state["wk_fecha_ref"] = fecha_ref
 sem_ini = monday_of_week(fecha_ref)
 sem_fin = saturday_of_week(fecha_ref)
 
-encargado_input = st.sidebar.text_input("Encargado de la semana", value="", key="wk_encargado")
+encargado_input = st.sidebar.text_input("Encargado de la semana", value=st.session_state.get("wk_encargado", ""), key="wk_encargado")
 
-semana_id, encargado, cerrada = ensure_semana(sem_ini, sem_fin, encargado_input or None)
+# Obtén/crea semana
+semana_id, encargado_guardado, cerrada = ensure_semana(sem_ini, sem_fin, encargado_input or None)
+
+# 🔄 Actualiza encargado si cambió y no está vacío
+if encargado_input.strip() and encargado_input.strip() != (encargado_guardado or ""):
+    with get_conn() as conn:
+        conn.execute("UPDATE semanas SET encargado=? WHERE id=?", (encargado_input.strip(), int(semana_id)))
+    encargado_guardado = encargado_input.strip()
 
 st.sidebar.caption(f"Semana: **{sem_ini} a {sem_fin}** (Lun–Sáb)")
 if cerrada:
-    st.sidebar.error(f"Semana CERRADA. Encargado: {encargado}")
+    st.sidebar.error(f"Semana CERRADA. Encargado: {encargado_guardado or '—'}")
     if st.sidebar.button("🔓 Abrir semana", use_container_width=True):
         with get_conn() as conn:
             conn.execute("UPDATE semanas SET cerrada=0 WHERE id=?", (int(semana_id),))
         st.success("✅ Semana abierta nuevamente.")
         st.rerun()
 else:
-    st.sidebar.success(f"Semana ABIERTA. Encargado: {encargado}")
+    st.sidebar.success(f"Semana ABIERTA. Encargado: {encargado_guardado or '—'}")
     if st.sidebar.button("🔒 Cerrar semana", use_container_width=True):
         with get_conn() as conn:
             conn.execute("UPDATE semanas SET cerrada=1 WHERE id=?", (int(semana_id),))
         st.warning("🔒 Semana cerrada correctamente.")
         st.rerun()
 
+# 🆕 Nueva semana: avanza 7 días, crea/selecciona y limpia formularios/vistas
 if st.sidebar.button("🆕 Nueva semana (Lun–Sáb)", use_container_width=True):
     nueva_ref = fecha_ref + timedelta(days=7)
     st.session_state["wk_fecha_ref"] = nueva_ref
+    st.session_state["wk_encargado"] = ""  # limpiar encargado de input para nueva semana
+    clear_form_state()
     ensure_semana(monday_of_week(nueva_ref), saturday_of_week(nueva_ref))
     st.rerun()
 
 # -------------------- Tabs --------------------
-reg_tab, montos_tab = st.tabs(["📅 Registros (Lun–Sáb)", "💵 Montos y Total (pago sábado)"])
-
-# Helpers para limpiar inputs manualmente
-def _reset_inputs():
-    for k in [
-        "add_fecha", "modo_trab", "trab_existente", "nuevo_nombre", "nuevo_cargo",
-        "add_monto", "add_act", "add_extra_flag", "add_extra_monto"
-    ]:
-        if k in st.session_state:
-            del st.session_state[k]
+reg_tab, montos_tab = st.tabs(["📋 Registros (Lun–Sáb)", "💰 Montos y Total (pago sábado)"])
 
 # -------------------- TAB 1 – Registros --------------------
 with reg_tab:
+    st.markdown("## 📋 Registros (Lunes a Sábado)")
     st.subheader("Registrar día por trabajador")
 
     if cerrada:
         st.info("🔒 Esta semana está cerrada. No se permiten altas ni ediciones.")
 
-    # ==== Entrada de datos (SIN form para que reaccione en vivo) ====
+    # ==== Captura reactiva (sin form) ====
     disabled = bool(cerrada)
 
     c1, c2 = st.columns([1, 2])
@@ -173,13 +186,14 @@ with reg_tab:
     col3, col4 = st.columns(2)
     with col3:
         add_monto = st.number_input(
-            "Monto del día (S/)", min_value=0.0, step=1.0, value=st.session_state.get("add_monto", 0.0),
+            "Monto del día (S/)", min_value=0.0, step=1.0,
+            value=st.session_state.get("add_monto", 0.0),
             key="add_monto", disabled=disabled
         )
     with col4:
         add_act = st.text_input("Actividad (opcional)", key="add_act", disabled=disabled)
 
-    # Adicional sábado (habilita EN VIVO si la fecha es sábado)
+    # Adicional sábado (en vivo)
     es_sabado = (isinstance(add_fecha, date) and add_fecha.weekday() == 5)
     colx = st.columns([1, 1])
     with colx[0]:
@@ -192,8 +206,7 @@ with reg_tab:
     with colx[1]:
         add_extra_monto = st.number_input(
             "Monto adicional (solo sábado)",
-            min_value=0.0,
-            step=1.0,
+            min_value=0.0, step=1.0,
             value=st.session_state.get("add_extra_monto", 0.0),
             key="add_extra_monto",
             disabled=(disabled or not es_sabado),
@@ -201,7 +214,7 @@ with reg_tab:
 
     guardar = st.button("💾 Guardar registro", use_container_width=True, disabled=disabled)
 
-    # ==== Validación y guardado ====
+    # Guardar
     if guardar and not cerrada:
         if not add_trab:
             st.error("El nombre del trabajador es obligatorio.")
@@ -215,7 +228,7 @@ with reg_tab:
                         (add_trab, add_cargo),
                     )
 
-            # Reglas robustas para el adicional: si es sábado y hay monto > 0, se fuerza el flag.
+            # Si es sábado y hay monto > 0, forzar flag
             extra_flag = 1 if (es_sabado and float(add_extra_monto or 0) > 0) else int(bool(add_extra_flag) and es_sabado)
             extra_monto = float(add_extra_monto if extra_flag else 0)
 
@@ -242,23 +255,20 @@ with reg_tab:
                         ),
                     )
                 st.success("Registro guardado/actualizado.")
-                _reset_inputs()  # limpia los campos
+                clear_form_state()
                 st.rerun()
             except Exception as e:
                 st.error(f"Error guardando registro: {e}")
 
-    # ==== Editor de trabajador (catálogo) ====
+    # ----- Editor simple de trabajador -----
     st.divider()
-    st.subheader("Editar trabajador (catálogo)")
-
+    st.markdown("### ✏️ Editar trabajador (catálogo)")
     with get_conn() as conn:
         cat_rows = conn.execute(
             "SELECT id, nombre, COALESCE(cargo, '') AS cargo, activo FROM trabajadores ORDER BY nombre"
         ).fetchall()
 
-    if not cat_rows:
-        st.info("Aún no tienes trabajadores en el catálogo.")
-    else:
+    if cat_rows:
         nombres_cat = [r["nombre"] for r in cat_rows]
         sel_edit = st.selectbox("Selecciona trabajador", options=["(Seleccione)"] + nombres_cat, index=0, key="edit_trab_sel")
         if sel_edit != "(Seleccione)":
@@ -290,10 +300,12 @@ with reg_tab:
                         conn.execute("UPDATE trabajadores SET activo=0 WHERE id=?", (int(tr["id"]),))
                     st.warning("Trabajador desactivado.")
                     st.rerun()
+    else:
+        st.info("Aún no tienes trabajadores en el catálogo.")
 
-    # ==== Vista semanal ====
+    # ----- Vista semanal -----
     st.divider()
-    st.subheader("Vista semanal (Lun–Sáb) por trabajador")
+    st.markdown("## 📊 Vista semanal (Lun–Sáb) por trabajador")
 
     with get_conn() as conn:
         df_det = pd.read_sql_query(
@@ -315,24 +327,17 @@ with reg_tab:
         df_det["fecha"] = pd.to_datetime(df_det["fecha"]).dt.date
         df_det["dow"] = pd.to_datetime(df_det["fecha"]).dt.weekday
 
-        # Montos por día LUN–SÁB
         df_pivot = df_det.pivot_table(index=["trabajador"], columns="dow", values="monto", aggfunc="sum").fillna(0)
         df_pivot = df_pivot.rename(columns={i: label_dow(i) for i in range(6)})
 
-        # Monto adicional (sábado): SUMA (no max)
         extras = (
             df_det[df_det["dow"] == 5]
             .groupby("trabajador", as_index=False)
             .agg(monto_adicional=("extra_monto", "sum"))
         )
-
-        # Días trabajados
         dias = df_det.groupby("trabajador")["fecha"].nunique().rename("dias").reset_index()
-
-        # Cargo por trabajador
         cargos = df_det.groupby("trabajador")["cargo"].agg(lambda x: next((v for v in x if v), "")).rename("cargo").reset_index()
 
-        # Unir
         df_sem = (
             df_pivot.reset_index()
             .merge(extras, on="trabajador", how="left")
@@ -352,7 +357,7 @@ with reg_tab:
 
 # -------------------- TAB 2 – Montos y Total (pago sábado) --------------------
 with montos_tab:
-    st.subheader("Montos por trabajador y total necesario el sábado")
+    st.markdown("## 💰 Montos y Total (pago sábado)")
 
     with get_conn() as conn:
         df = pd.read_sql_query(
