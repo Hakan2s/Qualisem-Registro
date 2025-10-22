@@ -1,7 +1,7 @@
 # =============================
 # app.py – QUALISEM G. (registros)
 # Hojas estilo Excel: cada hoja = una semana (LUN–SÁB)
-# Registro diario, adicional solo sábado, abrir/cerrar hoja,
+# Registro diario, adicional solo sábado, abrir/cerrar/ELIMINAR hoja,
 # editor de trabajadores con borrado de registros y totales.
 # =============================
 import pandas as pd
@@ -58,6 +58,12 @@ def list_hojas():
     df["semana_inicio"] = pd.to_datetime(df["semana_inicio"]).dt.date
     df["semana_fin"]    = pd.to_datetime(df["semana_fin"]).dt.date
     return df
+
+def delete_hoja(semana_id: int):
+    """Elimina la hoja/semana: borra sus entradas y luego la fila de semanas."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM entradas WHERE semana_id=?", (int(semana_id),))
+        conn.execute("DELETE FROM semanas  WHERE id=?", (int(semana_id),))
 
 # -------------------- Sidebar: selector de HOJA (semana) --------------------
 st.sidebar.title("📄 QUALISEM G. (registros)")
@@ -150,6 +156,41 @@ else:
         with get_conn() as conn:
             conn.execute("UPDATE semanas SET cerrada=1 WHERE id=?", (int(semana_id),))
         st.warning("🔒 Hoja cerrada.")
+        st.rerun()
+
+# --- Eliminar hoja (semana) actual ---
+st.sidebar.markdown("#### 🗑️ Eliminar hoja")
+with get_conn() as conn:
+    total_regs = conn.execute(
+        "SELECT COUNT(*) AS c FROM entradas WHERE semana_id=?", (int(semana_id),)
+    ).fetchone()["c"]
+
+st.sidebar.caption(
+    f"Esta hoja tiene **{total_regs}** registro(s). "
+    "Se eliminarán definitivamente de esta semana."
+)
+
+col_del_a, col_del_b = st.sidebar.columns([1, 1])
+with col_del_a:
+    confirm_del = st.checkbox("Sí, deseo eliminar", key=f"confirm_del_{semana_id}")
+with col_del_b:
+    danger = st.button("Eliminar hoja", use_container_width=True)
+
+if danger:
+    if not confirm_del:
+        st.sidebar.warning("Marca la casilla de confirmación para eliminar.")
+    else:
+        delete_hoja(semana_id)
+        # Elegir nueva hoja activa tras borrar
+        df_rest = list_hojas()
+        if df_rest.empty:
+            ini = monday_of_week(date.today())
+            fin = saturday_of_week(date.today())
+            sid_new, _, _ = ensure_semana(ini, fin, None)
+            st.session_state["hoja_id"] = int(sid_new)
+        else:
+            st.session_state["hoja_id"] = int(df_rest.iloc[0]["id"])
+        st.success("🗑️ Hoja eliminada correctamente.")
         st.rerun()
 
 # -------------------- Tabs --------------------
