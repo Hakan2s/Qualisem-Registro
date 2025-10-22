@@ -1,6 +1,6 @@
 # =============================
 # app.py – Planilla LUN–SÁB con abrir/cerrar semana, NUEVA SEMANA,
-# trabajador existente/nuevo y "Monto adicional" consistente
+# trabajador existente/nuevo, "Monto adicional" consistente y editor de trabajador
 # =============================
 import pandas as pd
 import streamlit as st
@@ -215,8 +215,8 @@ with reg_tab:
                         (add_trab, add_cargo),
                     )
 
-            # Regla: el adicional cuenta solo si la fecha es sábado
-            extra_flag = int(bool(add_extra_flag) and es_sabado)
+            # Reglas robustas para el adicional: si es sábado y hay monto > 0, se fuerza el flag.
+            extra_flag = 1 if (es_sabado and float(add_extra_monto or 0) > 0) else int(bool(add_extra_flag) and es_sabado)
             extra_monto = float(add_extra_monto if extra_flag else 0)
 
             try:
@@ -247,6 +247,50 @@ with reg_tab:
             except Exception as e:
                 st.error(f"Error guardando registro: {e}")
 
+    # ==== Editor de trabajador (catálogo) ====
+    st.divider()
+    st.subheader("Editar trabajador (catálogo)")
+
+    with get_conn() as conn:
+        cat_rows = conn.execute(
+            "SELECT id, nombre, COALESCE(cargo, '') AS cargo, activo FROM trabajadores ORDER BY nombre"
+        ).fetchall()
+
+    if not cat_rows:
+        st.info("Aún no tienes trabajadores en el catálogo.")
+    else:
+        nombres_cat = [r["nombre"] for r in cat_rows]
+        sel_edit = st.selectbox("Selecciona trabajador", options=["(Seleccione)"] + nombres_cat, index=0, key="edit_trab_sel")
+        if sel_edit != "(Seleccione)":
+            tr = next(r for r in cat_rows if r["nombre"] == sel_edit)
+            c1, c2, c3 = st.columns([1.2, 1, 0.8])
+            with c1:
+                nuevo_nombre = st.text_input("Nombre", value=tr["nombre"], key=f"edit_nombre_{tr['id']}")
+            with c2:
+                nuevo_cargo = st.text_input("Cargo", value=tr["cargo"], key=f"edit_cargo_{tr['id']}")
+            with c3:
+                activo_flag = st.checkbox("Activo", value=bool(tr["activo"]), key=f"edit_activo_{tr['id']}")
+
+            e1, e2 = st.columns(2)
+            with e1:
+                if st.button("💾 Guardar cambios", key=f"btn_save_trab_{tr['id']}"):
+                    try:
+                        with get_conn() as conn:
+                            conn.execute(
+                                "UPDATE trabajadores SET nombre=?, cargo=?, activo=? WHERE id=?",
+                                (nuevo_nombre.strip(), nuevo_cargo.strip(), int(activo_flag), int(tr["id"]))
+                            )
+                        st.success("Trabajador actualizado.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al actualizar: {e}")
+            with e2:
+                if st.button("🗑️ Desactivar (no mostrar)", key=f"btn_del_trab_{tr['id']}"):
+                    with get_conn() as conn:
+                        conn.execute("UPDATE trabajadores SET activo=0 WHERE id=?", (int(tr["id"]),))
+                    st.warning("Trabajador desactivado.")
+                    st.rerun()
+
     # ==== Vista semanal ====
     st.divider()
     st.subheader("Vista semanal (Lun–Sáb) por trabajador")
@@ -275,14 +319,14 @@ with reg_tab:
         df_pivot = df_det.pivot_table(index=["trabajador"], columns="dow", values="monto", aggfunc="sum").fillna(0)
         df_pivot = df_pivot.rename(columns={i: label_dow(i) for i in range(6)})
 
-        # Monto adicional (sábado): un solo valor por trabajador
+        # Monto adicional (sábado): SUMA (no max)
         extras = (
             df_det[df_det["dow"] == 5]
             .groupby("trabajador", as_index=False)
-            .agg(monto_adicional=("extra_monto", "max"))
+            .agg(monto_adicional=("extra_monto", "sum"))
         )
 
-        # Días trabajados (fechas únicas)
+        # Días trabajados
         dias = df_det.groupby("trabajador")["fecha"].nunique().rename("dias").reset_index()
 
         # Cargo por trabajador
@@ -317,7 +361,7 @@ with montos_tab:
                    COALESCE(t.cargo, '') AS cargo,
                    COUNT(DISTINCT date(e.fecha)) AS dias,
                    SUM(CASE WHEN strftime('%w', e.fecha) IN ('1','2','3','4','5','6') THEN e.monto ELSE 0 END) AS monto_semana,
-                   MAX(CASE WHEN strftime('%w', e.fecha) = '6' THEN e.extra_monto ELSE 0 END) AS monto_adicional
+                   SUM(CASE WHEN strftime('%w', e.fecha) = '6' THEN e.extra_monto ELSE 0 END) AS monto_adicional
             FROM entradas e
             LEFT JOIN trabajadores t ON t.nombre = e.trabajador
             WHERE e.semana_id=?
